@@ -38,19 +38,31 @@ function uid() { return Date.now().toString(36) + Math.random().toString(36).sli
 
 function newCharacter() {
   return {
-    id: uid(), name: 'New character', race: '', background: '', alignment: '', cls: 'fighter', clsName: '', subclass: '',
-    level: 1, xp: 0, ac: 10, speed: 30, initMisc: 0, inspiration: false,
+    id: uid(), name: 'New character', race: '', background: '', alignment: '',
+    classes: [newClass('fighter')], xp: 0, ac: 10, speed: 30, initMisc: 0, inspiration: false,
     abilities: { str: 10, dex: 10, con: 10, int: 10, wis: 10, cha: 10 },
     saveProf: {}, skills: {}, // skills: 0 none, 1 proficient, 2 expertise
-    hp: { max: 10, cur: 10, temp: 0 }, hitDiceUsed: 0, deathSaves: { s: 0, f: 0 },
+    hp: { max: 10, cur: 10, temp: 0 }, deathSaves: { s: 0, f: 0 },
     attacks: [], items: [], coins: { cp: 0, sp: 0, ep: 0, gp: 0, pp: 0 },
-    spell: { ability: '', override: false, slotsMax: [0, 0, 0, 0, 0, 0, 0, 0, 0], slotsUsed: [0, 0, 0, 0, 0, 0, 0, 0, 0], list: [] },
+    spell: { override: false, slotsMax: [0, 0, 0, 0, 0, 0, 0, 0, 0], slotsUsed: [0, 0, 0, 0, 0, 0, 0, 0, 0], pactUsed: 0, list: [] },
     backstory: '', personality: '', proficiencies: '', features: '', notes: '',
     log: [],
   };
 }
+// One entry per class the character has levels in (more than one = multiclass).
+// caster: '' = use SRD default; or 'none' | 'full' | 'half' | 'third' | 'pact' for homebrew / third-caster subclasses
+function newClass(cls) {
+  return { cls, clsName: '', subclass: '', level: 1, hitDie: 8, hdUsed: 0, caster: '', castAbility: '' };
+}
 // Fill any fields missing from older saves
 function normalize(c) {
+  if (!Array.isArray(c.classes)) { // saves from before multiclass support
+    c.classes = [Object.assign(newClass(c.cls || 'fighter'), {
+      clsName: c.clsName || '', subclass: c.subclass || '', level: Number(c.level) || 1,
+      hitDie: Number(c.hitDieCustom) || 8, hdUsed: Number(c.hitDiceUsed) || 0, castAbility: (c.spell && c.spell.ability) || '' })];
+    ['cls', 'clsName', 'subclass', 'level', 'hitDieCustom', 'hitDiceUsed'].forEach(k => delete c[k]);
+  }
+  c.classes = c.classes.map(k => Object.assign(newClass(k.cls), k));
   const d = newCharacter();
   for (const k in d) if (c[k] === undefined) c[k] = d[k];
   for (const k of ['abilities', 'hp', 'deathSaves', 'coins', 'spell']) c[k] = Object.assign({}, d[k], c[k]);
@@ -63,23 +75,55 @@ function cur() { return db.characters.find(c => c.id === view.id); }
 // ---------- rules math ----------
 const mod = score => Math.floor((Number(score) - 10) / 2);
 const fmt = n => (n >= 0 ? '+' : '') + n;
-const prof = c => Math.ceil(clampLevel(c.level) / 4) + 1;
 const clampLevel = l => Math.min(20, Math.max(1, Number(l) || 1));
-const classData = c => SRD.classes[c.cls];
-const className = c => (classData(c) ? classData(c).name : (c.clsName || 'Custom'));
+const totalLevel = c => Math.min(20, c.classes.reduce((t, k) => t + clampLevel(k.level), 0));
+const prof = c => Math.ceil(totalLevel(c) / 4) + 1;
+const srdClass = k => SRD.classes[k.cls];
+const kName = k => (srdClass(k) ? srdClass(k).name : (k.clsName || 'Custom'));
+const className = c => c.classes.map(k => kName(k) + (c.classes.length > 1 ? ' ' + clampLevel(k.level) : '')).join(' / ');
+const subclasses = c => c.classes.map(k => k.subclass).filter(Boolean).join(', ');
+const hitDie = k => (srdClass(k) ? srdClass(k).hitDie : (Number(k.hitDie) || 8));
+const SRD_CASTER = { bard: 'full', cleric: 'full', druid: 'full', sorcerer: 'full', wizard: 'full', paladin: 'half', ranger: 'half', warlock: 'pact' };
+const casterType = k => k.caster || SRD_CASTER[k.cls] || 'none';
+const kCastAbility = k => k.castAbility || (srdClass(k) && srdClass(k).castAbility) || (casterType(k) !== 'none' ? 'int' : '');
+const casters = c => c.classes.filter(k => casterType(k) !== 'none');
 const saveBonus = (c, a) => mod(c.abilities[a]) + (c.saveProf[a] ? prof(c) : 0);
 const skillBonus = (c, key) => {
   const sk = SKILLS.find(s => s[0] === key);
   return mod(c.abilities[sk[2]]) + (c.skills[key] || 0) * prof(c);
 };
 const initiative = c => mod(c.abilities.dex) + (Number(c.initMisc) || 0);
-const castAbility = c => c.spell.ability || (classData(c) && classData(c).castAbility) || '';
-const spellDC = c => castAbility(c) ? 8 + prof(c) + mod(c.abilities[castAbility(c)]) : null;
-const spellAtk = c => castAbility(c) ? prof(c) + mod(c.abilities[castAbility(c)]) : null;
+const kDC = (c, k) => 8 + prof(c) + mod(c.abilities[kCastAbility(k)]);
+const kAtk = (c, k) => prof(c) + mod(c.abilities[kCastAbility(k)]);
+const NO_SLOTS = [0, 0, 0, 0, 0, 0, 0, 0, 0];
+// Full-caster table (= the PHB multiclass spellcaster table)
+const fullTable = lv => (lv >= 1 && SRD.classes.wizard && SRD.classes.wizard.slots[Math.min(20, lv)]) || NO_SLOTS;
+// Regular spell slots (everything except Warlock pact magic)
 function slotsMax(c) {
   if (c.spell.override) return c.spell.slotsMax.map(n => Number(n) || 0);
-  const cd = classData(c);
-  return (cd && cd.slots[clampLevel(c.level)]) || [0, 0, 0, 0, 0, 0, 0, 0, 0];
+  const list = c.classes.filter(k => ['full', 'half', 'third'].includes(casterType(k)));
+  if (!list.length) return NO_SLOTS;
+  if (list.length === 1) { // single caster class: use that class's own table
+    const k = list[0], L = clampLevel(k.level), t = casterType(k), cd = srdClass(k);
+    if (cd && SRD_CASTER[k.cls] === t && cd.slots[L]) return cd.slots[L];
+    if (t === 'full') return fullTable(L);
+    if (t === 'half') return L >= 2 ? fullTable(Math.ceil(L / 2)) : NO_SLOTS;
+    return L >= 3 ? fullTable(Math.ceil(L / 3)) : NO_SLOTS;
+  }
+  // Multiclass: add full levels, half of half-caster levels, a third of third-caster levels (rounded down)
+  const lv = list.reduce((t, k) => {
+    const L = clampLevel(k.level), ty = casterType(k);
+    return t + (ty === 'full' ? L : ty === 'half' ? Math.floor(L / 2) : Math.floor(L / 3));
+  }, 0);
+  return fullTable(lv);
+}
+// Warlock pact magic: { count, level } — separate pool, recovers on a short rest
+function pactSlots(c) {
+  const lv = c.classes.filter(k => casterType(k) === 'pact').reduce((t, k) => t + clampLevel(k.level), 0);
+  if (!lv) return { count: 0, level: 0 };
+  const row = (SRD.classes.warlock && SRD.classes.warlock.slots[Math.min(20, lv)]) || NO_SLOTS;
+  const i = row.findIndex(n => n > 0);
+  return i < 0 ? { count: 0, level: 0 } : { count: row[i], level: i + 1 };
 }
 function attackHit(c, a) {
   const abil = a.ability ? mod(c.abilities[a.ability]) : 0;
@@ -99,11 +143,11 @@ const CALC = {
   prof: c => fmt(prof(c)),
   init: c => fmt(initiative(c)),
   pp: c => 10 + skillBonus(c, 'perception'),
-  dc: c => spellDC(c) ?? '—',
-  satk: c => spellAtk(c) === null ? '—' : fmt(spellAtk(c)),
+  dc: (c, i) => c.classes[i] ? kDC(c, c.classes[i]) : '',
+  satk: (c, i) => c.classes[i] ? fmt(kAtk(c, c.classes[i])) : '',
   hit: (c, i) => c.attacks[i] ? fmt(attackHit(c, c.attacks[i])) : '',
   dmg: (c, i) => c.attacks[i] ? attackDmg(c, c.attacks[i]) : '',
-  hd: c => `${clampLevel(c.level) - c.hitDiceUsed}/${clampLevel(c.level)} d${hitDie(c)}`,
+  hd: (c, i) => { const k = c.classes[i]; return k ? `${clampLevel(k.level) - k.hdUsed}/${clampLevel(k.level)}` : ''; },
   weight: c => c.items.reduce((t, it) => t + (Number(it.weight) || 0) * (Number(it.qty) || 0), 0).toFixed(1).replace(/\.0$/, ''),
 };
 function updateCalcs() {
@@ -113,7 +157,6 @@ function updateCalcs() {
     el.textContent = CALC[k](c, arg);
   });
 }
-const hitDie = c => (classData(c) ? classData(c).hitDie : (Number(c.hitDieCustom) || 8));
 
 // ---------- dice ----------
 // Supports expressions like "d20", "2d6+3", "1d8+1d6-1", "4d6kh3" (keep highest)
@@ -220,7 +263,7 @@ function render() {
   $app.innerHTML = `
     <header class="top">
       <button data-act="back" class="icon" aria-label="Back">‹</button>
-      <div class="title"><b>${esc(c.name)}</b><small>Lv ${clampLevel(c.level)} ${esc(className(c))}${c.subclass ? ' · ' + esc(c.subclass) : ''}</small></div>
+      <div class="title"><b>${esc(c.name)}</b><small>Lv ${totalLevel(c)} ${esc(className(c))}${subclasses(c) ? ' · ' + esc(subclasses(c)) : ''}</small></div>
       <div class="hpchip">${c.hp.cur}/${c.hp.max}${c.hp.temp ? ` +${c.hp.temp}` : ''} HP</div>
     </header>
     <nav class="tabs">${TABS.map(([k, l]) => `<button data-tab="${k}" class="${view.tab === k ? 'on' : ''}">${l}</button>`).join('')}</nav>
@@ -231,7 +274,7 @@ function renderList() {
   const list = db.characters.map(c => `
     <li><button class="charbtn" data-open="${c.id}">
       <b>${esc(c.name)}</b>
-      <span>Level ${clampLevel(c.level)} ${esc(c.race)} ${esc(className(c))}${c.subclass ? ' (' + esc(c.subclass) + ')' : ''}</span>
+      <span>Level ${totalLevel(c)} ${esc(c.race)} ${esc(className(c))}${subclasses(c) ? ' (' + esc(subclasses(c)) + ')' : ''}</span>
       <span>HP ${c.hp.cur}/${c.hp.max} · AC ${esc(c.ac)}</span>
     </button></li>`).join('');
   return `
@@ -253,17 +296,39 @@ function renderList() {
 
 const TAB_RENDER = {
   info(c) {
-    const classOpts = Object.entries(SRD.classes).map(([k, v]) => `<option value="${k}" ${c.cls === k ? 'selected' : ''}>${v.name}</option>`).join('')
-      + `<option value="custom" ${!classData(c) ? 'selected' : ''}>Other / homebrew…</option>`;
-    const subs = classData(c) ? classData(c).subclasses : [];
+    const total = c.classes.reduce((t, k) => t + clampLevel(k.level), 0);
+    const casterOpts = (k) => [['', 'Default'], ['none', 'Not a spellcaster'], ['full', 'Full caster'], ['half', 'Half caster'], ['third', 'Third caster (EK / AT style)'], ['pact', 'Pact magic (Warlock style)']]
+      .filter(([v]) => v || srdClass(k)).map(([v, l]) => `<option value="${v}" ${k.caster === v ? 'selected' : ''}>${l}</option>`).join('');
+    const classCards = c.classes.map((k, i) => {
+      const cd = srdClass(k); const subs = cd ? cd.subclasses : [];
+      const classOpts = Object.entries(SRD.classes).map(([key, v]) => `<option value="${key}" ${k.cls === key ? 'selected' : ''}>${v.name}</option>`).join('')
+        + `<option value="custom" ${!cd ? 'selected' : ''}>Other / homebrew…</option>`;
+      return `
+        <div class="classcard grid2">
+          <label>Class <select data-bind="classes.${i}.cls" data-rerender>${classOpts}</select></label>
+          <label>Level <input type="number" inputmode="numeric" min="1" max="20" data-bind="classes.${i}.level" value="${esc(k.level)}" data-rerender></label>
+          ${!cd ? `<label>Class name ${inp(`classes.${i}.clsName`, { ph: 'e.g. Artificer' })}</label><label>Hit die (d#) ${inp(`classes.${i}.hitDie`, { type: 'number' })}</label>` : ''}
+          <label class="span2">Subclass ${inp(`classes.${i}.subclass`, { attrs: `list="subclass-list-${i}"`, ph: subs.length ? 'SRD: ' + subs.join(', ') + ' — or type any' : 'Type your subclass' })}</label>
+          <datalist id="subclass-list-${i}">${subs.map(x => `<option value="${esc(x)}">`).join('')}</datalist>
+          <label>Spellcasting <select data-bind="classes.${i}.caster" data-rerender>${casterOpts(k)}</select></label>
+          ${casterType(k) !== 'none' ? `<label>Casting ability <select data-bind="classes.${i}.castAbility" data-rerender>
+            <option value="">${cd && cd.castAbility ? 'Default (' + cd.castAbility.toUpperCase() + ')' : 'Default (INT)'}</option>
+            ${ABILITIES.map(a => `<option value="${a}" ${k.castAbility === a ? 'selected' : ''}>${a.toUpperCase()}</option>`).join('')}</select></label>` : '<span></span>'}
+          ${c.classes.length > 1 ? `<div class="span2"><button class="danger small" data-del-class="${i}">Remove ${esc(kName(k))}</button></div>` : ''}
+        </div>`;
+    }).join('');
     return `
       <section class="card grid2">
         <label class="span2">Name ${inp('name')}</label>
-        <label>Class <select data-bind="cls" data-rerender>${classOpts}</select></label>
-        <label>Level <input type="number" inputmode="numeric" min="1" max="20" data-bind="level" value="${esc(c.level)}" data-rerender></label>
-        ${!classData(c) ? `<label>Class name ${inp('clsName', { ph: 'e.g. Artificer' })}</label><label>Hit die (d#) ${inp('hitDieCustom', { type: 'number', ph: '8' })}</label>` : ''}
-        <label class="span2">Subclass ${inp('subclass', { attrs: 'list="subclass-list"', ph: subs.length ? 'SRD: ' + subs.join(', ') + ' — or type any' : 'Type your subclass' })}</label>
-        <datalist id="subclass-list">${subs.map(s => `<option value="${esc(s)}">`).join('')}</datalist>
+      </section>
+      <section class="card">
+        <h3>Class${c.classes.length > 1 ? 'es' : ''} <small class="muted">· character level ${totalLevel(c)}</small></h3>
+        ${total > 20 ? '<p class="small" style="color:#b3261e">Class levels add up to more than 20.</p>' : ''}
+        ${classCards}
+        <button class="small" data-act="add-class">+ Add another class (multiclass)</button>
+        <p class="muted small">Fighter or Rogue with a spellcasting subclass (Eldritch Knight, Arcane Trickster)? Set Spellcasting to "Third caster".</p>
+      </section>
+      <section class="card grid2">
         <label>Race / species ${inp('race')}</label>
         <label>Background ${inp('background')}</label>
         <label>Alignment ${inp('alignment')}</label>
@@ -306,7 +371,7 @@ const TAB_RENDER = {
       <p class="muted small">Tap any modifier to roll it. Edit the score in the box.</p>
       <section class="card abilgrid">${abil}</section>
       <section class="card"><h3>Saving throws</h3>
-        ${classData(c) ? `<button class="small" data-act="class-saves">Use ${esc(className(c))} saves (${classData(c).saves.map(s => s.toUpperCase()).join(', ')})</button>` : ''}
+        ${srdClass(c.classes[0]) ? `<button class="small" data-act="class-saves">Use ${esc(kName(c.classes[0]))} saves (${srdClass(c.classes[0]).saves.map(s => s.toUpperCase()).join(', ')})</button>` : ''}
         <ul class="plist">${saves}</ul></section>
       <section class="card"><h3>Skills</h3><p class="muted small">○ none · ● proficient · ◆ expertise</p><ul class="plist">${skills}</ul></section>`;
   },
@@ -329,10 +394,9 @@ const TAB_RENDER = {
         <label>Temp <input type="number" inputmode="numeric" data-bind="hp.temp" value="${esc(c.hp.temp)}" data-rerender></label>
       </section>
       <section class="card">
-        <h3>Hit dice <small data-calc="hd">${CALC.hd(c)}</small></h3>
-        <div class="row">
-          <button data-act="spend-hd" ${c.hitDiceUsed >= clampLevel(c.level) ? 'disabled' : ''}>Spend hit die (d${hitDie(c)} ${fmt(mod(c.abilities.con))})</button>
-        </div>
+        <h3>Hit dice</h3>
+        ${c.classes.map((k, i) => `<div class="row"><span>${esc(kName(k))} d${hitDie(k)}: <b data-calc="hd:${i}">${CALC.hd(c, i)}</b> left</span>
+          <button data-spend-hd="${i}" ${k.hdUsed >= clampLevel(k.level) ? 'disabled' : ''}>Spend (d${hitDie(k)} ${fmt(mod(c.abilities.con))})</button></div>`).join('')}
         <p class="muted small">Suggested max HP at this level (average): ${avgHp(c)}</p>
       </section>
       <section class="card">
@@ -406,10 +470,7 @@ const TAB_RENDER = {
   },
 
   spells(c) {
-    const cd = classData(c); const L = clampLevel(c.level);
-    const max = slotsMax(c);
-    const abilOpts = `<option value="">${cd && cd.castAbility ? 'Class default (' + cd.castAbility.toUpperCase() + ')' : '—'}</option>`
-      + ABILITIES.map(a => `<option value="${a}" ${c.spell.ability === a ? 'selected' : ''}>${a.toUpperCase()}</option>`).join('');
+    const max = slotsMax(c); const pact = pactSlots(c);
     const slotRows = max.map((m, i) => {
       if (!c.spell.override && !m) return '';
       const used = Math.min(c.spell.slotsUsed[i] || 0, m);
@@ -418,34 +479,49 @@ const TAB_RENDER = {
         ${c.spell.override ? `<input type="number" inputmode="numeric" min="0" max="9" data-bind="spell.slotsMax.${i}" value="${esc(c.spell.slotsMax[i])}" data-rerender class="tiny">` : ''}
         <div class="pips">${pips}</div><small>${m - used}/${m}</small></div>`;
     }).join('');
-    const hints = [];
-    if (cd && cd.cantrips[L] != null) hints.push(`Cantrips known: ${cd.cantrips[L]}`);
-    if (cd && cd.known[L] != null) hints.push(`Spells known: ${cd.known[L]}`);
-    if (cd && ['cleric', 'druid', 'wizard', 'paladin'].includes(c.cls) && castAbility(c)) {
-      const half = c.cls === 'paladin';
-      const n = Math.max(1, mod(c.abilities[castAbility(c)]) + (half ? Math.floor(L / 2) : L));
-      hints.push(`Prepared spells: ${n}`);
+    let pactRow = '';
+    if (pact.count) {
+      const used = Math.min(c.spell.pactUsed || 0, pact.count);
+      pactRow = `<div class="slotrow"><span>Pact</span><div class="pips">${Array.from({ length: pact.count }, (_, j) =>
+        `<button class="pip pact ${j < pact.count - used ? 'on' : ''}" data-pact="${j}" aria-label="pact slot"></button>`).join('')}</div>
+        <small>${pact.count - used}/${pact.count} at Lv ${pact.level}</small></div>`;
     }
+
+    // One row per spellcasting class: DC, attack and how many spells it gets
+    const casterRows = casters(c).map(k => {
+      const i = c.classes.indexOf(k), cd = srdClass(k), L = clampLevel(k.level), ab = kCastAbility(k);
+      const hints = [];
+      if (cd && cd.cantrips[L] != null) hints.push(`${cd.cantrips[L]} cantrips`);
+      if (cd && cd.known[L] != null) hints.push(`${cd.known[L]} spells known`);
+      if (['cleric', 'druid', 'wizard', 'paladin'].includes(k.cls) && SRD_CASTER[k.cls] === casterType(k)) {
+        hints.push(`${Math.max(1, mod(c.abilities[ab]) + (k.cls === 'paladin' ? Math.floor(L / 2) : L))} prepared`);
+      }
+      return `<div class="caster">
+        <div><b>${esc(kName(k))}</b> <small class="muted">(${ab.toUpperCase()})${hints.length ? ' · ' + hints.join(' · ') : ''}</small></div>
+        <div class="row">
+          <div class="stat"><span>Save DC</span><b data-calc="dc:${i}">${CALC.dc(c, i)}</b></div>
+          <button class="rollable" data-spell-attack="${i}"><span>Spell attack</span><b data-calc="satk:${i}">${CALC.satk(c, i)}</b></button>
+        </div></div>`;
+    }).join('');
 
     const byLevel = {};
     c.spell.list.forEach((s, i) => { const d = spellData(s); (byLevel[d.l] = byLevel[d.l] || []).push([s, d, i]); });
     const lists = Object.keys(byLevel).sort((a, b) => a - b).map(l => `
       <h3 class="sect">${l == 0 ? 'Cantrips' : 'Level ' + l}</h3>
-      <ul class="spells">${byLevel[l].map(([s, d, i]) => renderSpell(c, s, d, i, max)).join('')}</ul>`).join('');
+      <ul class="spells">${byLevel[l].map(([s, d, i]) => renderSpell(c, s, d, i, max, pact)).join('')}</ul>`).join('');
 
     return `
-      <section class="card grid3">
-        <label>Casting ability <select data-bind="spell.ability" data-rerender>${abilOpts}</select></label>
-        <div class="stat"><span>Spell save DC</span><b data-calc="dc">${CALC.dc(c)}</b></div>
-        <div class="stat"><span>Spell attack</span><b data-calc="satk">${CALC.satk(c)}</b></div>
-        ${hints.length ? `<p class="span3 muted small">${hints.join(' · ')}</p>` : ''}
+      ${rollModeBar()}
+      <section class="card">
+        ${casterRows || `<p class="muted small">${esc(className(c))} has no spellcasting. You can still add spells (from a feat or race, for example). To make a class a caster, change its Spellcasting option on the Info tab.</p>`}
       </section>
       <section class="card">
         <h3>Spell slots</h3>
-        ${slotRows || `<p class="muted small">${cd && !cd.castAbility ? esc(className(c)) + ' has no spell slots. ' : ''}No slots at this level.</p>`}
-        <div class="row">${check('spell.override', 'Set slots manually (multiclass, homebrew…)')}</div>
-        <div class="row"><button class="small" data-act="reset-slots">Restore all slots</button>
-          ${spellAtk(c) !== null ? `<button class="small" data-act="spell-attack">Roll spell attack</button>` : ''}</div>
+        ${slotRows}${pactRow}
+        ${!slotRows && !pactRow ? '<p class="muted small">No spell slots at this level.</p>' : ''}
+        ${casters(c).filter(k => casterType(k) !== 'pact').length > 1 && !c.spell.override ? '<p class="muted small">Multiclass slots from the combined spellcaster level.</p>' : ''}
+        <div class="row">${check('spell.override', 'Set regular slots manually')}</div>
+        <div class="row"><button class="small" data-act="reset-slots">Restore all slots</button></div>
       </section>
       ${lists || '<p class="muted">No spells added yet.</p>'}
       ${renderSpellAdd(c)}`;
@@ -460,8 +536,14 @@ const TAB_RENDER = {
 };
 
 function avgHp(c) {
-  const hd = hitDie(c), con = mod(c.abilities.con), L = clampLevel(c.level);
-  return Math.max(1, hd + con + (L - 1) * (Math.floor(hd / 2) + 1 + con));
+  // First level of the first class: max die; every other level: average (die/2 + 1)
+  const con = mod(c.abilities.con);
+  let hp = 0;
+  c.classes.forEach((k, i) => {
+    const hd = hitDie(k), L = clampLevel(k.level);
+    hp += (i === 0 ? hd + con + (L - 1) * (hd / 2 + 1 + con) : L * (hd / 2 + 1 + con));
+  });
+  return Math.max(1, hp);
 }
 function rollModeBar() {
   return `<div class="rollmode">${[['normal', 'Normal'], ['adv', 'Advantage'], ['dis', 'Disadvantage']]
@@ -477,15 +559,18 @@ function spellData(s) {
   if (!s.custom && SPELL_BY_NAME[s.n]) return SPELL_BY_NAME[s.n];
   return { n: s.n, l: Number(s.l) || 0, s: s.s || '', t: s.t || '', r: s.r || '', c: s.c || '', d: s.d || '', desc: s.desc || '', hl: '', conc: !!s.conc, rit: false, cl: [] };
 }
-function renderSpell(c, s, d, i, max) {
+function renderSpell(c, s, d, i, max, pact) {
   const open = view.openSpell === i;
   const tags = [d.s, d.conc ? 'Concentration' : '', d.rit ? 'Ritual' : ''].filter(Boolean).join(' · ');
   let cast = '';
   if (open && d.l > 0) {
     const opts = max.map((m, li) => ({ li, left: m - Math.min(c.spell.slotsUsed[li] || 0, m) }))
       .filter(o => o.li + 1 >= d.l && o.left > 0);
-    cast = opts.length
-      ? `<div class="row">${opts.map(o => `<button class="primary small" data-cast="${i}:${o.li}">Cast at Lv ${o.li + 1} (${o.left} left)</button>`).join('')}</div>`
+    const pactLeft = pact.count - Math.min(c.spell.pactUsed || 0, pact.count);
+    const pactBtn = pact.count && pact.level >= d.l && pactLeft > 0
+      ? `<button class="primary small" data-cast-pact="${i}">Cast with pact slot (Lv ${pact.level}, ${pactLeft} left)</button>` : '';
+    cast = opts.length || pactBtn
+      ? `<div class="row">${opts.map(o => `<button class="primary small" data-cast="${i}:${o.li}">Cast at Lv ${o.li + 1} (${o.left} left)</button>`).join('')}${pactBtn}</div>`
       : '<p class="muted small">No slots left for this spell.</p>';
   }
   return `
@@ -504,18 +589,18 @@ function renderSpell(c, s, d, i, max) {
 }
 function renderSpellAdd(c) {
   const q = view.spellSearch.trim().toLowerCase();
-  const cls = c.cls;
+  const myClasses = c.classes.map(k => k.cls).filter(k => SRD.classes[k]);
   const have = new Set(c.spell.list.map(s => s.n));
   let results = [];
   if (q || view.spellClassOnly) {
-    results = SRD.spells.filter(s => (!q || s.n.toLowerCase().includes(q)) && (!view.spellClassOnly || !classData(c) || s.cl.includes(cls)));
+    results = SRD.spells.filter(s => (!q || s.n.toLowerCase().includes(q)) && (!view.spellClassOnly || !myClasses.length || s.cl.some(x => myClasses.includes(x))));
   }
   const shown = results.slice(0, 60);
   return `
     <section class="card">
       <h3>Add spells</h3>
       <input id="spell-search" placeholder="Search SRD spells…" value="${esc(view.spellSearch)}" autocomplete="off">
-      ${classData(c) ? `<label class="chk"><input type="checkbox" id="spell-classonly" ${view.spellClassOnly ? 'checked' : ''}> Only ${esc(className(c))} spells</label>` : ''}
+      ${myClasses.length ? `<label class="chk"><input type="checkbox" id="spell-classonly" ${view.spellClassOnly ? 'checked' : ''}> Only ${esc(myClasses.map(k => SRD.classes[k].name).join(' / '))} spells</label>` : ''}
       <ul class="results" id="spell-results">${shown.map(s => `
         <li><button data-add-spell="${esc(s.n)}" ${have.has(s.n) ? 'disabled' : ''}>${have.has(s.n) ? '✓' : '+'}</button>
           <span>${esc(s.n)} <small>${s.l ? 'Lv ' + s.l : 'Cantrip'} · ${esc(s.s)}</small></span></li>`).join('')}
@@ -561,8 +646,8 @@ $app.addEventListener('change', e => {
   if (t.id === 'spell-classonly') { view.spellClassOnly = t.checked; refreshSpellResults(); return; }
   if (t.dataset.act === 'import') return importFile(t.files[0]);
   if (!c) return;
-  if (t.dataset.bind === 'cls' && t.value === 'custom' && !c.clsName) c.clsName = '';
-  if (t.dataset.bind === 'level') c.level = clampLevel(t.value);
+  const lvMatch = /^classes\.(\d+)\.level$/.exec(t.dataset.bind || '');
+  if (lvMatch) { const k = c.classes[lvMatch[1]]; k.level = clampLevel(t.value); k.hdUsed = Math.min(k.hdUsed, k.level); }
   if (t.dataset.bind === 'spell.override' && t.checked) c.spell.slotsMax = [...slotsMax({ ...c, spell: { ...c.spell, override: false } })];
   if (t.dataset.bind && t.dataset.bind.startsWith('hp.')) { c.hp.cur = Math.min(c.hp.cur, c.hp.max); save(); }
   if (t.tagName === 'SELECT' || t.type === 'checkbox' || t.hasAttribute('data-rerender')) { save(); render(); }
@@ -607,6 +692,22 @@ $app.addEventListener('click', e => {
     c.spell.slotsUsed[li] = (c.spell.slotsUsed[li] || 0) + 1; save();
     toast(`Cast ${spellData(c.spell.list[i]).n} using a level ${li + 1} slot`); render(); return;
   }
+  if (d.spendHd) {
+    const k = c.classes[d.spendHd];
+    const r = rollFree(`Hit die (d${hitDie(k)})`, `1d${hitDie(k)}${fmt(mod(c.abilities.con))}`);
+    if (r) { k.hdUsed++; c.hp.cur = Math.min(c.hp.max, c.hp.cur + Math.max(0, r.total)); save(); render(); }
+    return;
+  }
+  if (d.delClass) { if (confirm(`Remove ${kName(c.classes[d.delClass])}?`)) { c.classes.splice(d.delClass, 1); save(); render(); } return; }
+  if (d.spellAttack) { const k = c.classes[d.spellAttack]; rollD20(`${kName(k)} spell attack`, kAtk(c, k)); return; }
+  if (d.pact) {
+    const n = pactSlots(c).count, j = Number(d.pact), left = n - (c.spell.pactUsed || 0);
+    c.spell.pactUsed = Math.max(0, Math.min(n, j < left ? n - j : n - j - 1)); save(); render(); return;
+  }
+  if (d.castPact) {
+    c.spell.pactUsed = (c.spell.pactUsed || 0) + 1; save();
+    toast(`Cast ${spellData(c.spell.list[d.castPact]).n} with a pact slot`); render(); return;
+  }
   if (d.delSpell) { c.spell.list.splice(d.delSpell, 1); view.openSpell = null; save(); render(); return; }
   if (d.addSpell) { c.spell.list.push({ n: d.addSpell, prep: false }); save(); render(); return; }
 
@@ -617,17 +718,13 @@ $app.addEventListener('click', e => {
     case 'duplicate': { const n = normalize(JSON.parse(JSON.stringify(c))); n.id = uid(); n.name += ' (copy)'; db.characters.push(n); save(); view.id = n.id; render(); toast('Duplicated'); break; }
     case 'export-all': download(`dnd-characters-${new Date().toISOString().slice(0, 10)}.json`, { characters: db.characters }); break;
     case 'export-one': download(`${c.name.replace(/[^\w-]+/g, '_')}.json`, { characters: [c] }); break;
-    case 'class-saves': ABILITIES.forEach(a => c.saveProf[a] = classData(c).saves.includes(a)); save(); render(); break;
+    case 'class-saves': ABILITIES.forEach(a => c.saveProf[a] = srdClass(c.classes[0]).saves.includes(a)); save(); render(); break;
+    case 'add-class': c.classes.push(newClass('fighter')); save(); render(); break;
     case 'add-attack': c.attacks.push({ name: '', ability: 'str', prof: true, bonus: 0, dmg: '1d8', type: '', addMod: true }); save(); render(); break;
     case 'add-item': c.items.push({ name: '', qty: 1, weight: 0, notes: '', equipped: false }); save(); render();
       { const all = document.querySelectorAll('.iname'); if (all.length) all[all.length - 1].focus(); } break;
     case 'roll-expr': doExprRoll(); break;
     case 'clear-log': c.log = []; save(); render(); break;
-    case 'spend-hd': {
-      const r = rollFree(`Hit die (d${hitDie(c)})`, `1d${hitDie(c)}${fmt(mod(c.abilities.con))}`);
-      if (r) { const heal = Math.max(0, r.total); c.hitDiceUsed++; c.hp.cur = Math.min(c.hp.max, c.hp.cur + heal); save(); render(); }
-      break;
-    }
     case 'death-roll': {
       const r = rollD20('Death save', 0);
       if (r.nat === 20) { c.hp.cur = 1; c.deathSaves = { s: 0, f: 0 }; toast('Nat 20: back up with 1 HP!'); }
@@ -639,17 +736,17 @@ $app.addEventListener('click', e => {
     }
     case 'death-reset': c.deathSaves = { s: 0, f: 0 }; save(); render(); break;
     case 'short-rest':
-      if (c.cls === 'warlock' && !c.spell.override) c.spell.slotsUsed = [0, 0, 0, 0, 0, 0, 0, 0, 0];
-      save(); render(); toast('Short rest taken' + (c.cls === 'warlock' ? ' — pact slots restored' : '')); break;
+      c.spell.pactUsed = 0;
+      save(); render(); toast('Short rest taken' + (pactSlots(c).count ? ' — pact slots restored' : '')); break;
     case 'long-rest': {
-      const L = clampLevel(c.level);
       c.hp.cur = c.hp.max; c.hp.temp = 0; c.deathSaves = { s: 0, f: 0 };
-      c.spell.slotsUsed = [0, 0, 0, 0, 0, 0, 0, 0, 0];
-      c.hitDiceUsed = Math.max(0, c.hitDiceUsed - Math.max(1, Math.floor(L / 2)));
+      c.spell.slotsUsed = [0, 0, 0, 0, 0, 0, 0, 0, 0]; c.spell.pactUsed = 0;
+      // Regain spent hit dice up to half the character level, biggest dice first
+      let regain = Math.max(1, Math.floor(totalLevel(c) / 2));
+      [...c.classes].sort((a, b) => hitDie(b) - hitDie(a)).forEach(k => { const n = Math.min(k.hdUsed, regain); k.hdUsed -= n; regain -= n; });
       save(); render(); toast('Long rest: HP, slots and hit dice restored'); break;
     }
-    case 'reset-slots': c.spell.slotsUsed = [0, 0, 0, 0, 0, 0, 0, 0, 0]; save(); render(); break;
-    case 'spell-attack': rollD20('Spell attack', spellAtk(c)); break;
+    case 'reset-slots': c.spell.slotsUsed = [0, 0, 0, 0, 0, 0, 0, 0, 0]; c.spell.pactUsed = 0; save(); render(); break;
     case 'add-custom-spell': {
       const g = id => document.getElementById(id);
       const name = g('cs-name').value.trim(); if (!name) { toast('Give the spell a name'); return; }
@@ -697,7 +794,7 @@ function importFile(file) {
 }
 
 // Expose for tests
-window.__dnd = { rollExpr, mod, prof, slotsMax };
+window.__dnd = { rollExpr, mod, prof, slotsMax, pactSlots, normalize };
 
 render();
 if ('serviceWorker' in navigator && location.protocol !== 'file:') navigator.serviceWorker.register('sw.js').catch(() => {});

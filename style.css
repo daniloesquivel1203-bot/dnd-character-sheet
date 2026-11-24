@@ -96,3 +96,7 @@ details summary { padding: 10px 0; cursor: pointer; }
 @media (min-width: 760px) {
   .abilgrid { grid-template-columns: repeat(6, 1fr); }
 }
+.classcard { border: 1px solid var(--line); border-radius: 8px; padding: 10px; margin-bottom: 8px; }
+.caster { padding: 6px 0; border-bottom: 1px solid var(--line); } .caster:last-child { border-bottom: 0; }
+.caster .stat, .caster .rollable { flex: 1; }
+.pip.pact { border-color: #5b3a8c; } .pip.pact.on { background: #5b3a8c; }

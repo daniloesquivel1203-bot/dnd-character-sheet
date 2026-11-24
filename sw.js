@@ -1,5 +1,5 @@
 // Offline cache. Bump VERSION whenever app files change so phones pick up the update.
-const VERSION = 'dnd-sheet-v1';
+const VERSION = 'dnd-sheet-v2';
 const FILES = ['./', 'index.html', 'style.css', 'app.js', 'data/srd.js', 'manifest.webmanifest', 'icons/icon-192.png', 'icons/icon-512.png'];
 
 self.addEventListener('install', e => {

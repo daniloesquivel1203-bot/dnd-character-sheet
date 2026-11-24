@@ -4,12 +4,12 @@ A simple D&D 5e character sheet app for Android phone and tablet. It is a **Prog
 
 ## Features
 - Multiple characters, saved on the device (browser localStorage)
-- Info: name, class, subclass, level, race, background, alignment, XP, AC, speed, proficiency bonus, initiative, passive Perception
+- Info: name, one or more classes (multiclassing) each with level and subclass, homebrew classes, race, background, alignment, XP, AC, speed, proficiency bonus, initiative, passive Perception
 - Stats: ability scores with modifiers, saving throws and skills (proficient / expertise); tap any modifier to roll it
-- HP: damage / heal / temp HP, hit dice, death saves, short and long rest
+- HP: damage / heal / temp HP, hit dice per class, death saves, short and long rest
 - Rolls: dice buttons, free-form expressions (`2d6+3`, `4d6kh3`), advantage / disadvantage, attacks with to-hit and damage, roll history
 - Items: inventory with quantity, weight, notes, equipped; coins; total weight vs carry capacity
-- Spells: spell save DC and attack, spell slots filled in automatically from class and level (tap to use / restore, or set them manually for multiclass/homebrew), the full SRD spell list to search and add (filtered by class), prepared toggle, cast at a chosen slot level, custom spells
+- Spells: save DC and spell attack per casting class, spell slots filled in automatically from class and level, including the multiclass spellcaster table, third casters (Eldritch Knight / Arcane Trickster) and a separate Warlock pact-slot pool that refills on a short rest (tap to use / restore, or set them manually), the full SRD spell list to search and add (filtered by class), prepared toggle, cast at a chosen slot level, custom spells
 - Story: backstory, personality, notes
 - Export / import JSON backups (also how to copy characters between phone and tablet)
 
